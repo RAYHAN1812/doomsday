@@ -1,0 +1,36 @@
+services:
+  - type: pserv
+    name: doomsday-api
+    runtime: docker
+    region: oregon
+    plan: 0.5c-512mb
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    disk:
+      name: api-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: PORT
+        value: "3000"
+      - key: DATABASE_PATH
+        value: /data/doomsday.db
+      - key: SEED_SAMPLE_DATA
+        value: "true"
+
+  - type: web
+    name: doomsday-web
+    runtime: docker
+    region: oregon
+    plan: free
+    dockerfilePath: ./web/Dockerfile
+    dockerContext: ./web
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: API_HOST
+        fromService:
+          type: pserv
+          name: doomsday-api
+          property: hostport

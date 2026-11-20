@@ -23,6 +23,12 @@ booking example, so every view has something to show straight away.
 
 Data is kept in the `api-data` volume. To start again from scratch: `docker compose down -v`.
 
+### Deploy to Render
+
+The root `render.yaml` defines a private API service and a public frontend service. In Render, choose
+**New > Blueprint** and connect this repository. The frontend is on the free plan; preserving the SQLite
+database requires a paid API plan with a persistent disk.
+
 ### Without Docker
 
 Requires Node.js 22.13 or newer (24 recommended).
