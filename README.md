@@ -327,3 +327,14 @@ Where the brief was open, these are the choices I made:
         └── components/     PrerequisitePicker
 ```
 
+---
+
+## AI Tool Usage
+
+I used AI tools, including GitHub Copilot and ChatGPT, during development to help understand technical
+concepts, review code, troubleshoot deployment issues, and improve documentation.
+
+I reviewed and tested the implementation and used these tools as development assistance. The core logic
+for movie dependency validation, rewatch ordering, and minimum-bundle booking is implemented in the project
+without using libraries that solve those problems.
+
