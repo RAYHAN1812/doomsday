@@ -20,16 +20,16 @@ const SAMPLE_CINEMAS = [
   { name: 'Asgard Odeon', bundleSizes: [4, 6] },
 ];
 
-export function seedSampleData(db: Db): { movies: number; cinemas: number } {
+export async function seedSampleData(db: Db): Promise<{ movies: number; cinemas: number }> {
   const movieService = new MovieService(db);
   const cinemaService = new CinemaService(db);
   let movies = 0;
   let cinemas = 0;
 
-  if (movieService.list().length === 0) {
+  if ((await movieService.list()).length === 0) {
     const idByTitle = new Map<string, number>();
     for (const m of SAMPLE_MOVIES) {
-      const created = movieService.create({
+      const created = await movieService.create({
         title: m.title,
         releaseYear: m.releaseYear,
         runtimeMinutes: m.runtimeMinutes,
@@ -41,9 +41,9 @@ export function seedSampleData(db: Db): { movies: number; cinemas: number } {
     }
   }
 
-  if (cinemaService.list().length === 0) {
+  if ((await cinemaService.list()).length === 0) {
     for (const c of SAMPLE_CINEMAS) {
-      cinemaService.create(c);
+      await cinemaService.create(c);
       cinemas++;
     }
   }

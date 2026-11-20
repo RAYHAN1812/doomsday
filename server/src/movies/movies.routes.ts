@@ -8,29 +8,29 @@ export function moviesRouter(db: Db): Router {
   const movies = new MovieService(db);
   const router = Router();
 
-  router.get('/', (_req, res) => {
-    res.json(movies.list());
+  router.get('/', async (_req, res) => {
+    res.json(await movies.list());
   });
 
-  router.post('/', (req, res) => {
-    res.status(201).json(movies.create(movieCreateSchema.parse(req.body)));
+  router.post('/', async (req, res) => {
+    res.status(201).json(await movies.create(movieCreateSchema.parse(req.body)));
   });
 
-  router.get('/:id', (req, res) => {
-    res.json(movies.get(parseId(req.params.id)));
+  router.get('/:id', async (req, res) => {
+    res.json(await movies.get(parseId(req.params.id)));
   });
 
-  router.patch('/:id', (req, res) => {
-    res.json(movies.update(parseId(req.params.id), movieUpdateSchema.parse(req.body)));
+  router.patch('/:id', async (req, res) => {
+    res.json(await movies.update(parseId(req.params.id), movieUpdateSchema.parse(req.body)));
   });
 
-  router.delete('/:id', (req, res) => {
-    movies.delete(parseId(req.params.id));
+  router.delete('/:id', async (req, res) => {
+    await movies.delete(parseId(req.params.id));
     res.status(204).end();
   });
 
-  router.get('/:id/rewatch-order', (req, res) => {
-    res.json(movies.rewatchPlan(parseId(req.params.id)));
+  router.get('/:id/rewatch-order', async (req, res) => {
+    res.json(await movies.rewatchPlan(parseId(req.params.id)));
   });
 
   return router;

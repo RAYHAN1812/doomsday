@@ -1,7 +1,8 @@
-import { transaction, type Db } from '../db.js';
+import { transaction, isUniqueViolation, type Db } from '../db.js';
 import { ApiError, notFound } from '../errors.js';
 import { rewatchOrder, wouldCreateCycle, type PrerequisiteGraph, type SortKey } from '../logic/graph.js';
 import type { MovieCreateInput, MovieUpdateInput } from './movies.schema.js';
+import type { PoolClient, QueryResultRow } from 'pg';
 
 export interface Movie {
   id: number;
@@ -21,12 +22,12 @@ export interface RewatchPlan {
   unwatchedRuntimeMinutes: number;
 }
 
-interface MovieRow {
+interface MovieRow extends QueryResultRow {
   id: number;
   title: string;
   release_year: number;
   runtime_minutes: number;
-  watched: number;
+  watched: boolean;
 }
 
 const circular = () =>
@@ -35,75 +36,101 @@ const circular = () =>
 export class MovieService {
   constructor(private readonly db: Db) {}
 
-  list(): Movie[] {
-    const rows = this.db
-      .prepare('SELECT * FROM movies ORDER BY release_year, title')
-      .all() as unknown as MovieRow[];
-    const graph = this.loadGraph();
+  async list(): Promise<Movie[]> {
+    const { rows } = await this.db.query<MovieRow>('SELECT * FROM movies ORDER BY release_year, LOWER(title)');
+    const graph = await this.loadGraph(this.db);
     return rows.map((row) => toMovie(row, graph));
   }
 
-  get(id: number): Movie {
-    const row = this.db.prepare('SELECT * FROM movies WHERE id = ?').get(id) as MovieRow | undefined;
+  async get(id: number): Promise<Movie> {
+    const { rows } = await this.db.query<MovieRow>('SELECT * FROM movies WHERE id = $1', [id]);
+    const row = rows[0];
     if (!row) throw notFound('Movie', id);
-    return toMovie(row, this.loadGraph());
+    return toMovie(row, await this.loadGraph(this.db));
   }
 
-  create(input: MovieCreateInput): Movie {
+  async create(input: MovieCreateInput): Promise<Movie> {
     const prerequisiteIds = unique(input.prerequisiteIds);
+    let id: number;
 
-    const id = transaction(this.db, () => {
-      this.assertTitleFree(input.title);
-      this.assertMoviesExist(prerequisiteIds);
-      const result = this.db
-        .prepare('INSERT INTO movies (title, release_year, runtime_minutes, watched) VALUES (?, ?, ?, ?)')
-        .run(input.title, input.releaseYear, input.runtimeMinutes, input.watched ? 1 : 0);
-      const newId = Number(result.lastInsertRowid);
-      this.replacePrerequisites(newId, prerequisiteIds);
-      return newId;
-    });
-
-    return this.get(id);
-  }
-
-  update(id: number, input: MovieUpdateInput): Movie {
-    transaction(this.db, () => {
-      this.get(id);
-
-      if (input.title !== undefined) this.assertTitleFree(input.title, id);
-
-      if (input.prerequisiteIds !== undefined) {
-        const prerequisiteIds = unique(input.prerequisiteIds);
-        if (prerequisiteIds.includes(id)) throw circular();
-        this.assertMoviesExist(prerequisiteIds);
-        if (wouldCreateCycle(this.loadGraph(), id, prerequisiteIds)) throw circular();
-        this.replacePrerequisites(id, prerequisiteIds);
-      }
-
-      const sets: string[] = [];
-      const values: (string | number)[] = [];
-      if (input.title !== undefined) (sets.push('title = ?'), values.push(input.title));
-      if (input.releaseYear !== undefined) (sets.push('release_year = ?'), values.push(input.releaseYear));
-      if (input.runtimeMinutes !== undefined) (sets.push('runtime_minutes = ?'), values.push(input.runtimeMinutes));
-      if (input.watched !== undefined) (sets.push('watched = ?'), values.push(input.watched ? 1 : 0));
-      if (sets.length > 0) {
-        this.db.prepare(`UPDATE movies SET ${sets.join(', ')} WHERE id = ?`).run(...values, id);
-      }
-    });
+    try {
+      id = await transaction(this.db, async (client) => {
+        await this.assertTitleFree(client, input.title);
+        await this.assertMoviesExist(client, prerequisiteIds);
+        const result = await client.query<{ id: number }>(
+          'INSERT INTO movies (title, release_year, runtime_minutes, watched) VALUES ($1, $2, $3, $4) RETURNING id',
+          [input.title, input.releaseYear, input.runtimeMinutes, input.watched],
+        );
+        const newId = result.rows[0]?.id;
+        if (newId === undefined) throw new Error('Movie insert did not return an id');
+        await this.replacePrerequisites(client, newId, prerequisiteIds);
+        return newId;
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) throw new ApiError(409, 'TITLE_TAKEN', `A movie titled "${input.title}" already exists`);
+      throw error;
+    }
 
     return this.get(id);
   }
 
-  delete(id: number): void {
-    const result = this.db.prepare('DELETE FROM movies WHERE id = ?').run(id);
-    if (result.changes === 0) throw notFound('Movie', id);
+  async update(id: number, input: MovieUpdateInput): Promise<Movie> {
+    try {
+      await transaction(this.db, async (client) => {
+        const existing = await client.query('SELECT id FROM movies WHERE id = $1', [id]);
+        if (existing.rowCount === 0) throw notFound('Movie', id);
+
+        if (input.title !== undefined) await this.assertTitleFree(client, input.title, id);
+
+        if (input.prerequisiteIds !== undefined) {
+          const prerequisiteIds = unique(input.prerequisiteIds);
+          if (prerequisiteIds.includes(id)) throw circular();
+          await this.assertMoviesExist(client, prerequisiteIds);
+          if (wouldCreateCycle(await this.loadGraph(client), id, prerequisiteIds)) throw circular();
+          await this.replacePrerequisites(client, id, prerequisiteIds);
+        }
+
+        const sets: string[] = [];
+        const values: unknown[] = [];
+        if (input.title !== undefined) {
+          values.push(input.title);
+          sets.push(`title = $${values.length}`);
+        }
+        if (input.releaseYear !== undefined) {
+          values.push(input.releaseYear);
+          sets.push(`release_year = $${values.length}`);
+        }
+        if (input.runtimeMinutes !== undefined) {
+          values.push(input.runtimeMinutes);
+          sets.push(`runtime_minutes = $${values.length}`);
+        }
+        if (input.watched !== undefined) {
+          values.push(input.watched);
+          sets.push(`watched = $${values.length}`);
+        }
+        if (sets.length > 0) {
+          values.push(id);
+          await client.query(`UPDATE movies SET ${sets.join(', ')} WHERE id = $${values.length}`, values);
+        }
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) throw new ApiError(409, 'TITLE_TAKEN', `A movie titled "${input.title}" already exists`);
+      throw error;
+    }
+
+    return this.get(id);
   }
 
-  rewatchPlan(targetId: number): RewatchPlan {
-    const target = this.get(targetId);
-    const all = this.list();
+  async delete(id: number): Promise<void> {
+    const result = await this.db.query('DELETE FROM movies WHERE id = $1', [id]);
+    if (result.rowCount === 0) throw notFound('Movie', id);
+  }
+
+  async rewatchPlan(targetId: number): Promise<RewatchPlan> {
+    const target = await this.get(targetId);
+    const all = await this.list();
     const byId = new Map(all.map((m) => [m.id, m]));
-    const graph = this.loadGraph();
+    const graph = await this.loadGraph(this.db);
     const sortKeys = new Map<number, SortKey>(all.map((m) => [m.id, { releaseYear: m.releaseYear, title: m.title }]));
 
     const movies = rewatchOrder(graph, targetId, sortKeys).map((id) => byId.get(id)!);
@@ -119,12 +146,12 @@ export class MovieService {
     };
   }
 
-  private loadGraph(): PrerequisiteGraph {
-    const edges = this.db
-      .prepare('SELECT movie_id, prerequisite_id FROM movie_prerequisites ORDER BY movie_id, prerequisite_id')
-      .all() as unknown as { movie_id: number; prerequisite_id: number }[];
+  private async loadGraph(queryable: Db | PoolClient): Promise<PrerequisiteGraph> {
+    const { rows } = await queryable.query<{ movie_id: number; prerequisite_id: number }>(
+      'SELECT movie_id, prerequisite_id FROM movie_prerequisites ORDER BY movie_id, prerequisite_id',
+    );
     const graph = new Map<number, number[]>();
-    for (const { movie_id, prerequisite_id } of edges) {
+    for (const { movie_id, prerequisite_id } of rows) {
       const list = graph.get(movie_id);
       if (list) list.push(prerequisite_id);
       else graph.set(movie_id, [prerequisite_id]);
@@ -132,25 +159,38 @@ export class MovieService {
     return graph;
   }
 
-  private replacePrerequisites(movieId: number, prerequisiteIds: number[]): void {
-    this.db.prepare('DELETE FROM movie_prerequisites WHERE movie_id = ?').run(movieId);
-    const insert = this.db.prepare('INSERT INTO movie_prerequisites (movie_id, prerequisite_id) VALUES (?, ?)');
-    for (const p of prerequisiteIds) insert.run(movieId, p);
+  private async replacePrerequisites(client: PoolClient, movieId: number, prerequisiteIds: number[]): Promise<void> {
+    await client.query('DELETE FROM movie_prerequisites WHERE movie_id = $1', [movieId]);
+    if (prerequisiteIds.length === 0) return;
+
+    const values: number[] = [];
+    const placeholders = prerequisiteIds.map((prerequisiteId) => {
+      values.push(movieId, prerequisiteId);
+      const first = values.length - 1;
+      return `($${first}, $${first + 1})`;
+    });
+    await client.query(
+      `INSERT INTO movie_prerequisites (movie_id, prerequisite_id) VALUES ${placeholders.join(', ')}`,
+      values,
+    );
   }
 
-  private assertTitleFree(title: string, exceptId?: number): void {
-    const clash = this.db
-      .prepare('SELECT id FROM movies WHERE title = ? COLLATE NOCASE AND id IS NOT ?')
-      .get(title, exceptId ?? null);
-    if (clash) throw new ApiError(409, 'TITLE_TAKEN', `A movie titled "${title}" already exists`);
+  private async assertTitleFree(client: PoolClient, title: string, exceptId?: number): Promise<void> {
+    const { rowCount } = await client.query(
+      'SELECT id FROM movies WHERE LOWER(title) = LOWER($1) AND ($2::INTEGER IS NULL OR id <> $2) LIMIT 1',
+      [title, exceptId ?? null],
+    );
+    if (rowCount !== 0) throw new ApiError(409, 'TITLE_TAKEN', `A movie titled "${title}" already exists`);
   }
 
-  private assertMoviesExist(ids: number[]): void {
+  private async assertMoviesExist(client: PoolClient, ids: number[]): Promise<void> {
     if (ids.length === 0) return;
-    const found = this.db
-      .prepare(`SELECT id FROM movies WHERE id IN (${ids.map(() => '?').join(', ')})`)
-      .all(...ids) as unknown as { id: number }[];
-    const foundIds = new Set(found.map((r) => r.id));
+    const placeholders = ids.map((_, index) => `$${index + 1}`).join(', ');
+    const { rows } = await client.query<{ id: number }>(
+      `SELECT id FROM movies WHERE id IN (${placeholders})`,
+      ids,
+    );
+    const foundIds = new Set(rows.map((row) => row.id));
     const missing = ids.filter((id) => !foundIds.has(id));
     if (missing.length > 0) {
       throw new ApiError(400, 'UNKNOWN_PREREQUISITE', 'Some prerequisites do not exist', { missingIds: missing });
@@ -164,7 +204,7 @@ function toMovie(row: MovieRow, graph: PrerequisiteGraph): Movie {
     title: row.title,
     releaseYear: row.release_year,
     runtimeMinutes: row.runtime_minutes,
-    watched: row.watched === 1,
+    watched: row.watched,
     prerequisiteIds: [...(graph.get(row.id) ?? [])],
   };
 }

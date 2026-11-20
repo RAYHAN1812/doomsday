@@ -1,7 +1,8 @@
-import { transaction, type Db } from '../db.js';
+import { transaction, isUniqueViolation, type Db } from '../db.js';
 import { ApiError, notFound } from '../errors.js';
 import { quoteBundles, type BookingQuote } from '../logic/booking.js';
 import type { CinemaCreateInput } from './cinemas.schema.js';
+import type { PoolClient, QueryResultRow } from 'pg';
 
 export interface Cinema {
   id: number;
@@ -11,61 +12,94 @@ export interface Cinema {
 
 export type Booking = { cinema: { id: number; name: string }; groupSize: number } & BookingQuote;
 
+interface CinemaRow extends QueryResultRow {
+  id: number;
+  name: string;
+}
+
+interface BundleSizeRow extends QueryResultRow {
+  cinema_id: number;
+  size: number;
+}
+
 export class CinemaService {
   constructor(private readonly db: Db) {}
 
-  list(): Cinema[] {
-    const cinemas = this.db.prepare('SELECT id, name FROM cinemas ORDER BY name').all() as unknown as {
-      id: number;
-      name: string;
-    }[];
-    const sizes = this.db
-      .prepare('SELECT cinema_id, size FROM cinema_bundle_sizes ORDER BY size')
-      .all() as unknown as { cinema_id: number; size: number }[];
+  async list(): Promise<Cinema[]> {
+    const [{ rows: cinemas }, { rows: sizes }] = await Promise.all([
+      this.db.query<CinemaRow>('SELECT id, name FROM cinemas ORDER BY LOWER(name)'),
+      this.db.query<BundleSizeRow>('SELECT cinema_id, size FROM cinema_bundle_sizes ORDER BY size'),
+    ]);
 
-    return cinemas.map((c) => ({
-      id: c.id,
-      name: c.name,
-      bundleSizes: sizes.filter((s) => s.cinema_id === c.id).map((s) => s.size),
+    return cinemas.map((cinema) => ({
+      id: cinema.id,
+      name: cinema.name,
+      bundleSizes: sizes.filter((size) => size.cinema_id === cinema.id).map((size) => size.size),
     }));
   }
 
-  get(id: number): Cinema {
-    const cinema = this.db.prepare('SELECT id, name FROM cinemas WHERE id = ?').get(id) as
-      | { id: number; name: string }
-      | undefined;
+  async get(id: number): Promise<Cinema> {
+    const { rows } = await this.db.query<CinemaRow>('SELECT id, name FROM cinemas WHERE id = $1', [id]);
+    const cinema = rows[0];
     if (!cinema) throw notFound('Cinema', id);
-    const sizes = this.db
-      .prepare('SELECT size FROM cinema_bundle_sizes WHERE cinema_id = ? ORDER BY size')
-      .all(id) as unknown as { size: number }[];
-    return { id: cinema.id, name: cinema.name, bundleSizes: sizes.map((s) => s.size) };
+    const { rows: sizes } = await this.db.query<{ size: number }>(
+      'SELECT size FROM cinema_bundle_sizes WHERE cinema_id = $1 ORDER BY size',
+      [id],
+    );
+    return { id: cinema.id, name: cinema.name, bundleSizes: sizes.map((size) => size.size) };
   }
 
-  create(input: CinemaCreateInput): Cinema {
-    const id = transaction(this.db, () => {
-      const clash = this.db.prepare('SELECT id FROM cinemas WHERE name = ? COLLATE NOCASE').get(input.name);
-      if (clash) throw new ApiError(409, 'NAME_TAKEN', `A cinema named "${input.name}" already exists`);
+  async create(input: CinemaCreateInput): Promise<Cinema> {
+    let id: number;
+    try {
+      id = await transaction(this.db, async (client) => {
+        await this.assertNameFree(client, input.name);
+        const result = await client.query<{ id: number }>(
+          'INSERT INTO cinemas (name) VALUES ($1) RETURNING id',
+          [input.name],
+        );
+        const newId = result.rows[0]?.id;
+        if (newId === undefined) throw new Error('Cinema insert did not return an id');
 
-      const result = this.db.prepare('INSERT INTO cinemas (name) VALUES (?)').run(input.name);
-      const newId = Number(result.lastInsertRowid);
-      const insert = this.db.prepare('INSERT INTO cinema_bundle_sizes (cinema_id, size) VALUES (?, ?)');
-      for (const size of input.bundleSizes) insert.run(newId, size);
-      return newId;
-    });
+        const values: number[] = [];
+        const placeholders = input.bundleSizes.map((size) => {
+          values.push(newId, size);
+          const first = values.length - 1;
+          return `($${first}, $${first + 1})`;
+        });
+        await client.query(
+          `INSERT INTO cinema_bundle_sizes (cinema_id, size) VALUES ${placeholders.join(', ')}`,
+          values,
+        );
+        return newId;
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) throw new ApiError(409, 'NAME_TAKEN', `A cinema named "${input.name}" already exists`);
+      throw error;
+    }
+
     return this.get(id);
   }
 
-  delete(id: number): void {
-    const result = this.db.prepare('DELETE FROM cinemas WHERE id = ?').run(id);
-    if (result.changes === 0) throw notFound('Cinema', id);
+  async delete(id: number): Promise<void> {
+    const result = await this.db.query('DELETE FROM cinemas WHERE id = $1', [id]);
+    if (result.rowCount === 0) throw notFound('Cinema', id);
   }
 
-  booking(id: number, groupSize: number): Booking {
-    const cinema = this.get(id);
+  async booking(id: number, groupSize: number): Promise<Booking> {
+    const cinema = await this.get(id);
     return {
       cinema: { id: cinema.id, name: cinema.name },
       groupSize,
       ...quoteBundles(cinema.bundleSizes, groupSize),
     };
+  }
+
+  private async assertNameFree(client: PoolClient, name: string): Promise<void> {
+    const { rowCount } = await client.query(
+      'SELECT id FROM cinemas WHERE LOWER(name) = LOWER($1) LIMIT 1',
+      [name],
+    );
+    if (rowCount !== 0) throw new ApiError(409, 'NAME_TAKEN', `A cinema named "${name}" already exists`);
   }
 }

@@ -1,46 +1,43 @@
 # Doomsday Ready
 
-A small full-stack app that helps MCU fans plan their rewatch before **Avengers: Doomsday** and book an
+A full-stack app that helps MCU fans plan their rewatch before **Avengers: Doomsday** and book an
 opening-night watch party.
 
-- **API:** Node.js, Express 5, TypeScript, SQLite (Node's built-in `node:sqlite`, so nothing native to compile)
+- **API:** Node.js, Express 5, TypeScript, PostgreSQL (`pg`)
 - **Frontend:** React 19 + Vite
-- **Tests:** Vitest + Supertest (every expected result from the brief is a test)
-- **Run it:** Docker Compose, one command
+- **Database:** Neon PostgreSQL
+- **Tests:** Vitest + Supertest, using embedded PostgreSQL for API tests
+- **Hosting:** Render Free web services + Neon Free
 
 ---
 
 ## Quick start
 
-### With Docker (recommended)
+### With Docker Compose
+
+Create a Neon database, copy [.env.example](./.env.example) to `.env`, replace the placeholder with your
+Neon connection string, then run:
 
 ```bash
 docker compose up --build
 ```
 
-Open **http://localhost:8080**. The database starts with the brief's sample movies and one cinema per
-booking example, so every view has something to show straight away.
-
-Data is kept in the `api-data` volume. To start again from scratch: `docker compose down -v`.
-
-### Deploy to Render
-
-The root `render.yaml` defines a private API service and a public frontend service. In Render, choose
-**New > Blueprint** and connect this repository. The frontend is on the free plan; preserving the SQLite
-database requires a paid API plan with a persistent disk.
+Open **http://localhost:8080**. The database is Neon; sample movies and cinemas are inserted if their
+tables are empty.
 
 ### Without Docker
 
-Requires Node.js 22.13 or newer (24 recommended).
+Requires Node.js 22.13 or newer and a Neon PostgreSQL connection string.
 
 ```bash
-# Terminal 1: API on http://localhost:3000/api
-cd server
+# PowerShell terminal 1: API on http://localhost:3000/api
+$env:DATABASE_URL = 'postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require'
+Set-Location server
 npm install
 npm run dev
 
-# Terminal 2: frontend on http://localhost:5173 (forwards /api to the API)
-cd web
+# PowerShell terminal 2: frontend on http://localhost:5173 (forwards /api to the API)
+Set-Location web
 npm install
 npm run dev
 ```
@@ -50,10 +47,60 @@ npm run dev
 | `npm test` | Runs the unit and API tests |
 | `npm run typecheck` | Type-checks the API and tests |
 | `npm run build && npm start` | Production build and start |
-| `npm run seed` | Adds the sample data to empty tables |
+| `npm run seed` | Adds sample data to empty tables |
+| `npm run migrate:sqlite -- data/doomsday.db` | One-time import of an existing local SQLite database |
 
-API settings (environment variables): `PORT` (default `3000`), `DATABASE_PATH` (default `data/doomsday.db`),
-`SEED_SAMPLE_DATA` (default `true`; set `false` to start with an empty database).
+### Environment variables
+
+| Variable | Service | Purpose |
+| --- | --- | --- |
+| `NODE_ENV` | API | Set to `production` on Render |
+| `PORT` | API and frontend | Render uses `10000`; local API defaults to `3000` |
+| `DATABASE_URL` | API | Neon PostgreSQL connection string |
+| `SEED_SAMPLE_DATA` | API | Defaults to `true`; set `false` to skip automatic sample data |
+| `API_URL` | Frontend | Public API service base URL in Render, without a trailing slash |
+
+Never commit `.env` or database credentials.
+
+---
+
+## Neon and Render deployment
+
+### Create a Neon database
+
+1. Sign in to the [Neon Console](https://console.neon.tech/) and choose **New Project**.
+2. Keep the **Free** plan selected and choose a region near your Render services.
+3. Create the project, open **Connect**, select the pooled connection option, and copy the connection
+   string for your application.
+4. Keep the connection string private. It contains the database credentials.
+
+The API creates the required PostgreSQL tables and indexes on startup. Sample records are added when
+`SEED_SAMPLE_DATA=true` and the corresponding tables are empty.
+
+To copy records from the existing local database before the API seeds Neon, set `DATABASE_URL` in the
+server shell and run `npm run migrate:sqlite -- data/doomsday.db` from `server/`. The command runs in one
+transaction and refuses to write if the target already contains data. Do this before deploying the API;
+it requires a local copy of the SQLite file. The deployed application itself uses only PostgreSQL.
+
+### Deploy on Render Free
+
+1. Push this repository to GitHub and choose **New > Blueprint** in Render.
+2. Connect `RAYHAN1812/doomsday`. Render reads the root `render.yaml` and creates the API and frontend as
+   Free web services.
+3. When prompted for `DATABASE_URL`, paste the Neon pooled connection string. If the Blueprint is already
+   created, add it under **doomsday-api > Environment > Environment Variables** in the Render dashboard.
+4. After the API service deploys, open its public URL in Render.
+5. In **doomsday-web > Environment > Environment Variables**, add `API_URL` with the API's public base URL
+   (for example, `https://doomsday-api.onrender.com`; do not append `/api` or a trailing slash). Save and
+   redeploy the frontend.
+6. Copy the frontend service's public `onrender.com` URL from its Render dashboard.
+
+The frontend's Nginx proxy forwards `/api` requests to `API_URL`, so browser requests remain same-origin.
+Test the backend by opening `<API_URL>/api/health`, `<API_URL>/api/movies`, and `<API_URL>/api/cinemas`.
+Open the frontend's `onrender.com` URL to test the complete app. Render Free services sleep after 15
+minutes without traffic and can take about a minute to wake; the 750 free instance hours are shared across
+the workspace. Neon Free compute scales to zero after inactivity and has project usage limits. Keep both
+Render services on **Free**, keep Neon on **Free**, and monitor each provider's usage and billing pages.
 
 ---
 
@@ -247,9 +294,9 @@ Where the brief was open, these are the choices I made:
   runtimes; Doomsday's 150 minutes is a placeholder) and one cinema per booking example. The cinema names
   are made up.
 - **Extras** beyond the brief: `GET` one movie or cinema, `DELETE` for both, and a health check.
-- **Storage.** SQLite through Node's built-in `node:sqlite` keeps setup to `npm install` with nothing
-  native to compile. Node prints an "experimental feature" warning for it in development; the
-  production start command hides that warning.
+- **Storage.** PostgreSQL is the source of truth. The schema is created idempotently at API startup, with
+  lower-case unique indexes for case-insensitive movie titles and cinema names. The optional SQLite
+  importer is only for copying an existing local database; it is not included in the production image.
 
 ---
 
@@ -264,10 +311,11 @@ Where the brief was open, these are the choices I made:
 │   │   ├── movies/         schema (validation), service (database + rules), routes
 │   │   ├── cinemas/        schema, service, routes
 │   │   ├── app.ts          Express app (used by the server and the tests)
-│   │   ├── db.ts           SQLite schema and transaction helper
+│   │   ├── db.ts           PostgreSQL schema, pool and transaction helper
 │   │   ├── errors.ts       error type and JSON error handler
 │   │   └── seed.ts         sample data
-│   └── tests/              logic.test.ts (unit), api.test.ts (HTTP, in-memory database)
+│   ├── scripts/            optional one-time SQLite data importer
+│   └── tests/              logic.test.ts (unit), api.test.ts (HTTP, embedded PostgreSQL)
 └── web/                    React app
     └── src/
         ├── api.ts          typed API client

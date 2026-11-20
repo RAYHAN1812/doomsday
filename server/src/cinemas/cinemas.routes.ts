@@ -8,27 +8,27 @@ export function cinemasRouter(db: Db): Router {
   const cinemas = new CinemaService(db);
   const router = Router();
 
-  router.get('/', (_req, res) => {
-    res.json(cinemas.list());
+  router.get('/', async (_req, res) => {
+    res.json(await cinemas.list());
   });
 
-  router.post('/', (req, res) => {
-    res.status(201).json(cinemas.create(cinemaCreateSchema.parse(req.body)));
+  router.post('/', async (req, res) => {
+    res.status(201).json(await cinemas.create(cinemaCreateSchema.parse(req.body)));
   });
 
-  router.get('/:id', (req, res) => {
-    res.json(cinemas.get(parseId(req.params.id)));
+  router.get('/:id', async (req, res) => {
+    res.json(await cinemas.get(parseId(req.params.id)));
   });
 
-  router.delete('/:id', (req, res) => {
-    cinemas.delete(parseId(req.params.id));
+  router.delete('/:id', async (req, res) => {
+    await cinemas.delete(parseId(req.params.id));
     res.status(204).end();
   });
 
-  router.get('/:id/booking', (req, res) => {
+  router.get('/:id/booking', async (req, res) => {
     const id = parseId(req.params.id);
     const groupSize = groupSizeSchema.parse(req.query.groupSize);
-    res.json(cinemas.booking(id, groupSize));
+    res.json(await cinemas.booking(id, groupSize));
   });
 
   return router;

@@ -1,22 +1,38 @@
 import request from 'supertest';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { PGlite } from '@electric-sql/pglite';
+import { createPgConfig } from '@electric-sql/pglite/node-postgres';
+import { Pool } from 'pg';
 import { createApp } from '../src/app.js';
-import { openDatabase } from '../src/db.js';
+import { initializeDatabase, transaction, type Db } from '../src/db.js';
 import { seedSampleData } from '../src/seed.js';
 
 let app: ReturnType<typeof createApp>;
+let db: Db;
+let embeddedDb: PGlite;
 let movieId: (title: string) => number;
 let cinemaId: (name: string) => number;
 
+beforeAll(async () => {
+  embeddedDb = new PGlite();
+  db = new Pool(createPgConfig(embeddedDb));
+  await initializeDatabase(db);
+});
+
 beforeEach(async () => {
-  const db = openDatabase(':memory:');
-  seedSampleData(db);
+  await db.query('TRUNCATE movies, cinemas RESTART IDENTITY CASCADE');
+  await seedSampleData(db);
   app = createApp(db);
 
   const movies: { id: number; title: string }[] = (await request(app).get('/api/movies')).body;
   movieId = (title) => movies.find((m) => m.title === title)!.id;
   const cinemas: { id: number; name: string }[] = (await request(app).get('/api/cinemas')).body;
   cinemaId = (name) => cinemas.find((c) => c.name === name)!.id;
+});
+
+afterAll(async () => {
+  await db.end();
+  await embeddedDb.close();
 });
 
 const titles = (body: { movies: { title: string }[] }) => body.movies.map((m) => m.title);
@@ -139,6 +155,17 @@ describe('rewatch order', () => {
 });
 
 describe('cinemas and booking', () => {
+  it('lists cinemas and gets one cinema with its bundle sizes', async () => {
+    const list = await request(app).get('/api/cinemas');
+    expect(list.status).toBe(200);
+    expect(list.body).toHaveLength(4);
+
+    const id = cinemaId('Asgard Odeon');
+    const res = await request(app).get(`/api/cinemas/${id}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ id, name: 'Asgard Odeon', bundleSizes: [4, 6] });
+  });
+
   it.each([
     { name: 'Stark Tower Screens', group: 6, total: 2, bundles: [{ size: 3, count: 2 }] },
     { name: 'Wakanda Picture House', group: 11, total: 4, bundles: [{ size: 5, count: 1 }, { size: 2, count: 3 }] },
@@ -190,10 +217,69 @@ describe('cinemas and booking', () => {
   it('returns 404 when booking at an unknown cinema', async () => {
     expect((await request(app).get('/api/cinemas/999/booking?groupSize=4')).status).toBe(404);
   });
+
+  it('deletes a cinema', async () => {
+    const id = cinemaId('Asgard Odeon');
+    await request(app).delete(`/api/cinemas/${id}`).expect(204);
+    await request(app).get(`/api/cinemas/${id}`).expect(404);
+  });
+});
+
+describe('database integrity', () => {
+  it('rolls back related writes when a transaction fails', async () => {
+    await expect(
+      transaction(db, async (client) => {
+        const result = await client.query<{ id: number }>(
+          'INSERT INTO cinemas (name) VALUES ($1) RETURNING id',
+          ['Rollback Test'],
+        );
+        await client.query('INSERT INTO cinema_bundle_sizes (cinema_id, size) VALUES ($1, $2)', [
+          result.rows[0].id,
+          7,
+        ]);
+        throw new Error('force rollback');
+      }),
+    ).rejects.toThrow('force rollback');
+
+    const { rows } = await db.query('SELECT id FROM cinemas WHERE name = $1', ['Rollback Test']);
+    expect(rows).toEqual([]);
+  });
+
+  it('enforces case-insensitive uniqueness and foreign-key cascades', async () => {
+    const { rows: uniqueIndexes } = await db.query<{ indexname: string }>(
+      "SELECT indexname FROM pg_indexes WHERE indexname IN ('movies_title_lower_unique', 'cinemas_name_lower_unique')",
+    );
+    expect(uniqueIndexes.map((index) => index.indexname).sort()).toEqual([
+      'cinemas_name_lower_unique',
+      'movies_title_lower_unique',
+    ]);
+
+    const deletedMovieId = movieId('Iron Man');
+    await db.query('DELETE FROM movies WHERE id = $1', [deletedMovieId]);
+    const { rows: remainingPrerequisites } = await db.query(
+      'SELECT movie_id FROM movie_prerequisites WHERE prerequisite_id = $1',
+      [deletedMovieId],
+    );
+    expect(remainingPrerequisites).toEqual([]);
+
+    const deletedCinemaId = cinemaId('Asgard Odeon');
+    await db.query('DELETE FROM cinemas WHERE id = $1', [deletedCinemaId]);
+    const { rows: remainingBundles } = await db.query(
+      'SELECT size FROM cinema_bundle_sizes WHERE cinema_id = $1',
+      [deletedCinemaId],
+    );
+    expect(remainingBundles).toEqual([]);
+  });
 });
 
 it('returns a JSON 400 for a malformed body', async () => {
   const res = await request(app).post('/api/movies').set('Content-Type', 'application/json').send('{oops');
   expect(res.status).toBe(400);
   expect(res.body.error.code).toBe('INVALID_JSON');
+});
+
+it('returns a successful API health check', async () => {
+  const res = await request(app).get('/api/health');
+  expect(res.status).toBe(200);
+  expect(res.body).toEqual({ status: 'ok' });
 });
