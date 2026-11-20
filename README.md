@@ -58,7 +58,7 @@ npm run dev
 | `PORT` | API and frontend | Render uses `10000`; local API defaults to `3000` |
 | `DATABASE_URL` | API | Neon PostgreSQL connection string |
 | `SEED_SAMPLE_DATA` | API | Defaults to `true`; set `false` to skip automatic sample data |
-| `API_HOST` | Frontend | Backend hostname only, e.g. `doomsday-api.onrender.com` |
+| `API_HOST` | Frontend | Required backend hostname only, e.g. `doomsday-api.onrender.com` |
 | `API_SCHEME` | Frontend | `https` on Render; Docker Compose uses `http` internally |
 
 Never commit `.env` or database credentials.
