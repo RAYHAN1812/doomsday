@@ -12,7 +12,8 @@ services:
     ports:
       - "8080:80"
     environment:
-      API_URL: http://api:10000
+      API_SCHEME: http
+      API_HOST: api:10000
       PORT: "80"
     depends_on:
       api:

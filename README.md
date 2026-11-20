@@ -58,7 +58,8 @@ npm run dev
 | `PORT` | API and frontend | Render uses `10000`; local API defaults to `3000` |
 | `DATABASE_URL` | API | Neon PostgreSQL connection string |
 | `SEED_SAMPLE_DATA` | API | Defaults to `true`; set `false` to skip automatic sample data |
-| `API_URL` | Frontend | Public API service base URL in Render, without a trailing slash |
+| `API_HOST` | Frontend | Backend hostname only, e.g. `doomsday-api.onrender.com` |
+| `API_SCHEME` | Frontend | `https` on Render; Docker Compose uses `http` internally |
 
 Never commit `.env` or database credentials.
 
@@ -90,13 +91,14 @@ it requires a local copy of the SQLite file. The deployed application itself use
 3. When prompted for `DATABASE_URL`, paste the Neon pooled connection string. If the Blueprint is already
    created, add it under **doomsday-api > Environment > Environment Variables** in the Render dashboard.
 4. After the API service deploys, open its public URL in Render.
-5. In **doomsday-web > Environment > Environment Variables**, add `API_URL` with the API's public base URL
-   (for example, `https://doomsday-api.onrender.com`; do not append `/api` or a trailing slash). Save and
-   redeploy the frontend.
+5. In **doomsday-web > Environment > Environment Variables**, set `API_HOST` to the backend's public
+   hostname only (for example, `doomsday-api.onrender.com`; no `https://`, port, or path). Keep
+   `API_SCHEME=https`. Save and redeploy the frontend.
 6. Copy the frontend service's public `onrender.com` URL from its Render dashboard.
 
-The frontend's Nginx proxy forwards `/api` requests to `API_URL`, so browser requests remain same-origin.
-Test the backend by opening `<API_URL>/api/health`, `<API_URL>/api/movies`, and `<API_URL>/api/cinemas`.
+The frontend's Nginx proxy forwards `/api/` requests over HTTPS to `API_HOST`, with TLS SNI enabled, so
+browser requests remain same-origin. Test the backend by opening
+`https://<API_HOST>/api/health`, `https://<API_HOST>/api/movies`, and `https://<API_HOST>/api/cinemas`.
 Open the frontend's `onrender.com` URL to test the complete app. Render Free services sleep after 15
 minutes without traffic and can take about a minute to wake; the 750 free instance hours are shared across
 the workspace. Neon Free compute scales to zero after inactivity and has project usage limits. Keep both
